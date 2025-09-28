@@ -1,0 +1,299 @@
+import asyncio
+import json
+import logging
+import os
+from typing import Annotated, List
+
+import aiohttp
+import openai as openai_client
+from dotenv import load_dotenv
+from livekit.agents import (
+    NOT_GIVEN,
+    Agent,
+    AgentFalseInterruptionEvent,
+    AgentSession,
+    JobContext,
+    JobProcess,
+    MetricsCollectedEvent,
+    RoomInputOptions,
+    RunContext,
+    WorkerOptions,
+    cli,
+    llm,
+    metrics,
+    get_job_context
+)
+from livekit.agents.llm import function_tool
+from livekit.plugins import cartesia, deepgram, noise_cancellation, openai, silero
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
+
+logger = logging.getLogger("agent")
+
+load_dotenv(".env.local")
+
+
+class Assistant(Agent):
+    def __init__(self) -> None:
+        super().__init__(
+            instructions="""You are a helpful assistant with knowledge of a fictional beauty salon.
+            The salon is called “Luxe Locks,” located in downtown Springfield.
+            It offers haircuts, coloring, styling, manicures, pedicures, and spa treatments.
+            Its target audience is young professionals and families, and it is known for a welcoming atmosphere and affordable luxury.
+            
+            If you cannot confidently answer a question, you must:
+            1. Reply to the user with: "Let me check with my supervisor and get back to you."
+            2. Call the post_user_query tool with the original user question and user_id from job context metadata.""",
+        )
+        self.collection_name = "answer-embeddings"
+        openai_client.api_key = os.getenv("OPENAI_API_KEY")
+        self.FIREBASE_URL= os.environ.get("FIREBASE_URL")
+
+    def _get_query_embedding(self, text: str) -> List[float]:
+        """Compute the embedding for the given text using the same model as ingestion."""
+        response = openai_client.embeddings.create(
+            input=text,
+            model="text-embedding-3-small"
+        )
+        return response.data[0].embedding
+
+    async def _firebase_vector_search(self, *, collection_name: str, query_vector: list[float] = None, limit: int = 3):
+        """Call the Firebase search_vectors endpoint and return matches."""
+        if not self.FIREBASE_URL:
+            raise RuntimeError("FIREBASE_URL is not set")
+        if not query_vector:
+            raise ValueError("Provide query_vector")
+        payload = {
+            "query_vector": query_vector,
+            "collection": collection_name,
+            "top_k": limit,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.FIREBASE_URL+"/vector-search", json=payload, timeout=10) as r:
+                text = await r.text()
+                if r.status != 200:
+                    raise RuntimeError(f"Firebase search failed: {r.status} {text}")
+                data = json.loads(text)
+                return data.get("matches", [])
+            
+    @function_tool
+    async def post_user_query(self, context: RunContext, query: str):
+        """Post a user message to the HITL endpoint.
+
+        Args:
+            query: The user's query to send to the endpoint
+        """
+        url = self.FIREBASE_URL+"/addquery"
+        
+        # Prepare the query data
+        room = get_job_context().room
+        participant = next(iter(room.remote_participants.values()))
+        job_id = get_job_context().job.id
+        query_data = {
+            "query": query,
+            "user_id": participant.attributes.get("user_id"),
+            "room_name": room.name,
+            "job_id": job_id,
+        }
+
+        logger.info(f"Posting user query to {url}: {query}")
+        logger.info(f"Extracted user_id: {participant.attributes.get('user_id')}")
+        logger.info(f"Extracted job_id: {job_id}")
+        logger.info(f"Extracted room_name: {room.name}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=query_data) as response:
+                    response_text = await response.text()
+                    logger.info(f"Response status: {response.status}")
+                    logger.info(f"Response body: {response_text}")
+                    
+                    if response.status == 200:
+                        return f"Query posted successfully. Response: {response_text}"
+                    else:
+                        return f"Failed to post query. Status: {response.status}, Response: {response_text}"
+                    
+        except aiohttp.ClientError as e:
+            error_msg = f"Request failed: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+        except Exception as e:
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+
+    async def on_llm_response(self, context: RunContext, message: str):
+        """Intercept LLM output and escalate if needed"""
+        if not message or "I don't know" in message.lower():
+            # Send friendly fallback to user
+            await context.session.say("Let me check with my supervisor and get back to you.")
+            
+            # Escalate
+            job_ctx = context.job
+            room = job_ctx.room
+            participant = next(iter(room.remote_participants.values()))
+            await self.post_user_query(
+                context,
+                query=message,
+                user_id=participant.attributes.get("user_id"),
+            )
+            return NOT_GIVEN  # don't send default message to room
+
+        return message
+
+    @function_tool
+    async def retrieve_info(
+        self,
+        query: Annotated[str, llm.TypeInfo(description="The user's query to search in knowledge base")]
+    ) -> str:
+        """Retrieve relevant information from Qdrant vector database for the given query."""
+        try:
+            logger.info(f"retrieve_info called with query: {query}")
+
+            # Step 2: Compute embedding for the query
+            query_embedding = await asyncio.to_thread(self._get_query_embedding, query)
+
+            # Step 3: Perform a semantic search using the query embedding
+            semantic_results = await asyncio.to_thread(
+                self._firebase_vector_search,
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=3,  # Retrieve top 3 most relevant results
+            )
+            logger.info(f"Semantic search returned {len(semantic_results)} points")
+            if not semantic_results or len(semantic_results) == 0:
+                return "I couldn't find relevant information in our knowledge base."
+
+            # Step 4: Combine retrieved results into a concise response
+            retrieved_texts = [
+                r.payload.get("text", "").strip() 
+                for r in semantic_results 
+                if r.payload.get("text")
+            ]
+            if not retrieved_texts:
+                return "I couldn't find relevant information in our knowledge base."
+
+            combined_response = "\n".join(retrieved_texts)
+            truncated_response = combined_response[:1000]  # Limit response length
+            logger.info(f"Returning combined response: {truncated_response}")
+            return f"Here's what I found:\n{truncated_response}"
+
+        except Exception as e:
+            logger.error(f"Error in retrieve_info: {e}")
+            return f"Error retrieving information: {str(e)}"
+
+
+def prewarm(proc: JobProcess):
+    proc.userdata["vad"] = silero.VAD.load()
+
+
+async def entrypoint(ctx: JobContext):
+    # Logging setup
+    # Add any other context you want in all log entries here
+    ctx.log_context_fields = {
+        "room": ctx.room.name,
+    }
+    logger.info(f"Job context metadata: {ctx.job.metadata}")
+    # logger.info(f"User connected to room: {user_name} (ID: {user_id})")
+    logger.info(f"Room participants: {[p.identity for p in ctx.room.remote_participants.values()]}")
+
+    # Set up participant tracking for user identity logging BEFORE starting the session
+    @ctx.room.on("participant_connected")
+    def _on_participant_connected(participant):
+        logger.info(f"Participant connected: {participant.identity} (SID: {participant.sid})")
+        md = participant.metadata
+        try:
+            md_obj = json.loads(md) if md else {}
+            logger.info(f"Participant metadata (parsed): {md_obj}")
+        except Exception:
+            logger.info(f"Participant metadata (raw): {md}")
+
+    @ctx.room.on("participant_disconnected")
+    def _on_participant_disconnected(participant):
+        logger.info(f"Participant disconnected: {participant.identity} (SID: {participant.sid})")
+
+
+    # Set up a voice AI pipeline using OpenAI, Cartesia, Deepgram, and the LiveKit turn detector
+    session = AgentSession(
+        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
+        # See all providers at https://docs.livekit.io/agents/integrations/llm/
+        llm=openai.LLM(model="gpt-4o-mini"),
+        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
+        # See all providers at https://docs.livekit.io/agents/integrations/stt/
+        stt=deepgram.STT(model="nova-3", language="multi"),
+        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
+        # See all providers at https://docs.livekit.io/agents/integrations/tts/
+        tts=cartesia.TTS(voice="6f84f4b8-58a2-430c-8c79-688dad597532"),
+        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
+        # See more at https://docs.livekit.io/agents/build/turns
+        turn_detection=MultilingualModel(),
+        vad=ctx.proc.userdata["vad"],
+        # allow the LLM to generate a response while waiting for the end of turn
+        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
+        preemptive_generation=True,
+    )
+
+    # To use a realtime model instead of a voice pipeline, use the following session setup instead:
+    # session = AgentSession(
+    #     # See all providers at https://docs.livekit.io/agents/integrations/realtime/
+    #     llm=openai.realtime.RealtimeModel(voice="marin")
+    # )
+
+    # sometimes background noise could interrupt the agent session, these are considered false positive interruptions
+    # when it's detected, you may resume the agent's speech
+    @session.on("agent_false_interruption")
+    def _on_agent_false_interruption(ev: AgentFalseInterruptionEvent):
+        logger.info("false positive interruption, resuming")
+        session.generate_reply(instructions=ev.extra_instructions or NOT_GIVEN)
+
+    # Metrics collection, to measure pipeline performance
+    # For more information, see https://docs.livekit.io/agents/build/metrics/
+    usage_collector = metrics.UsageCollector()
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: MetricsCollectedEvent):
+        metrics.log_metrics(ev.metrics)
+        usage_collector.collect(ev.metrics)
+
+    async def log_usage():
+        summary = usage_collector.get_summary()
+        logger.info(f"Usage: {summary}")
+
+    ctx.add_shutdown_callback(log_usage)
+
+    # # Add a virtual avatar to the session, if desired
+    # # For other providers, see https://docs.livekit.io/agents/integrations/avatar/
+    # avatar = hedra.AvatarSession(
+    #   avatar_id="...",  # See https://docs.livekit.io/agents/integrations/avatar/hedra
+    # )
+    # # Start the avatar and wait for it to join
+    # await avatar.start(session, room=ctx.room)
+
+    # Start the session, which initializes the voice pipeline and warms up the models
+    await session.start(
+        agent=Assistant(),
+        room=ctx.room,
+        room_input_options=RoomInputOptions(
+            # LiveKit Cloud enhanced noise cancellation
+            # - If self-hosting, omit this parameter
+            # - For telephony applications, use `BVCTelephony` for best results
+            noise_cancellation=noise_cancellation.BVC(),
+        ),
+    )
+
+    await ctx.connect()
+
+    if ctx.room.remote_participants:
+        for p in ctx.room.remote_participants.values():
+            logger.info(f"Existing participant: {p.identity} (SID: {p.sid})")
+            md = p.metadata
+            try:
+                md_obj = json.loads(md) if md else {}
+                logger.info(f"Existing participant metadata (parsed): {md_obj}")
+            except Exception:
+                logger.info(f"Existing participant metadata (raw): {md}")
+    else:
+        logger.info("No existing remote participants at connect() time.")
+
+
+if __name__ == "__main__":
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
