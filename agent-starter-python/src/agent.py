@@ -35,15 +35,28 @@ load_dotenv(".env.local")
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="""You are a helpful assistant with knowledge of a fictional beauty salon.
-            The salon is called “Luxe Locks,” located in downtown Springfield.
-            It offers haircuts, coloring, styling, manicures, pedicures, and spa treatments.
-            Its target audience is young professionals and families, and it is known for a welcoming atmosphere and affordable luxury.
-            
-            If you cannot confidently answer a question, you must:
-            1. Reply to the user with: "Let me check with my supervisor and get back to you."
-            2. Call the retrieve_info tool with the original user question.
-            3. If the retrieve_info tool does not return relevant information, call the post_user_query tool with the original user question.""",
+            instructions = """
+            You are a helpful assistant for a fictional beauty salon, Luxe Locks (downtown Springfield).
+            Services: haircuts, coloring, styling, manicures, pedicures, spa treatments.
+            Audience: young professionals and families.
+            Tone: welcoming and concise.
+
+            ALWAYS follow this policy for every user question or request:
+
+            1) First, check whether the question can be answered using the facts above (location, services, audience, atmosphere).
+            - If yes, answer directly from the prompt and stop.
+            - Example: "Where are you located?" → "We’re in downtown Springfield."
+
+            2) If the answer is not found in the prompt, call the `answer` tool with the user's raw utterance.
+
+            3) If the tool returns a KB answer, speak that answer.
+
+            4) If the tool indicates it escalated to a supervisor, speak exactly:
+            "Let me check with my supervisor and get back to you."
+
+            Never guess or fabricate salon facts; only use the prompt facts, KB results, or escalate.
+            """,
+
         )
         self.collection_name = "answers_index"
         openai_client.api_key = os.getenv("OPENAI_API_KEY")
@@ -141,6 +154,25 @@ class Assistant(Agent):
             return NOT_GIVEN  # don't send default message to room
 
         return message
+        
+    @function_tool
+    async def answer(self, context: RunContext, query: str) -> str:
+        """
+        Resolve user questions by checking the KB first, then escalating if needed.
+        Returns the exact text the agent should say to the user.
+        """
+        # 1) Try KB
+        kb_resp = await self.retrieve_info(context, query=query)
+        if kb_resp and "I couldn't find relevant information" not in kb_resp:
+            # Strip the "Here's what I found:\n" prefix if present
+            if kb_resp.lower().startswith("here's what i found"):
+                kb_resp = kb_resp.split("\n", 1)[-1].strip() or kb_resp
+            return kb_resp
+
+        # 2) Escalate (HITL)
+        # Post to supervisor, then return the mandated line
+        await self.post_user_query(context, query=query)
+        return "Let me check with my supervisor and get back to you."
 
     @function_tool
     async def retrieve_info(self, context: RunContext, query: str) -> str:
@@ -154,7 +186,7 @@ class Assistant(Agent):
             # Step 2: Compute embedding for the query
             query_embedding = await asyncio.to_thread(self._get_query_embedding, query)
             logger.info("Embedding length: %d", len(query_embedding))
-            logger.info(f"Query embedding: {query_embedding}")
+            # logger.info(f"Query embedding: {query_embedding}")
             # Step 3: Perform a semantic search using the query embedding
             semantic_results = await self._firebase_vector_search(
                 collection_name=self.collection_name,
@@ -169,7 +201,7 @@ class Assistant(Agent):
             retrieved_texts = []
             for r in semantic_results:
                 # your server returns fields at the top level (no "payload")
-                text = (r.get("text") or "").strip()
+                text = (r.get("answer_text") or "").strip()
                 if text:
                     retrieved_texts.append(text)
             logger.info(f"Retrieved texts: {retrieved_texts}")
