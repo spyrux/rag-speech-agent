@@ -69,7 +69,7 @@ class Assistant(Agent):
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(self.FIREBASE_URL+"/vector-search", json=payload, timeout=10) as r:
+            async with session.post(self.FIREBASE_URL+"/vector_search", json=payload, timeout=10) as r:
                 text = await r.text()
                 if r.status != 200:
                     raise RuntimeError(f"Firebase search failed: {r.status} {text}")
