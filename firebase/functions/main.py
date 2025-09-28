@@ -22,6 +22,8 @@ from typing import Dict, Any, List
 # parameter in the decorator, e.g. @https_fn.on_request(max_instances=5).
 set_global_options(max_instances=10)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
+EMBED_DIM = int(os.environ.get("EMBED_DIM", "1536"))
 initialize_app()
 
 def json_default(o):
@@ -176,7 +178,7 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
         firestore_client = firestore.client()
         collection = firestore_client.collection(collection_name)
         vector_query = collection.find_nearest(
-            vector_field="embedding",
+            vector_field="answer_embedding",
             query_vector=Vector([float(x) for x in query_vector]),
             distance_measure=DistanceMeasure.COSINE,
             limit=top_k,
@@ -203,58 +205,49 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
     except Exception as e:
         return https_fn.Response(f"Error performing vector search: {e}", status=500)
 
-async def embed_text_openai(text: str) -> List[float]:
-    # OpenAI client is sync; run in a thread to avoid blocking
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    def _sync():
-        resp = client.embeddings.create(model="text-embedding-3-small", input=text)
-        return resp.data[0].embedding
-    return await asyncio.to_thread(_sync)
-
-
-async def get_embedding(text: str) -> List[float]:
-    vec = await embed_text_openai(text)
+def get_embedding_sync(text: str) -> list[float]:
+    """Synchronous embedding call (OpenAI). Replace with your own if needed."""
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    resp = client.embeddings.create(model=EMBED_MODEL, input=text)
+    vec = resp.data[0].embedding
+    if len(vec) != EMBED_DIM:
+        raise RuntimeError(f"Embedding dim mismatch: got {len(vec)}, expected {EMBED_DIM}")
     return vec
 
 @https_fn.on_request()
 def addanswer(req: https_fn.Request) -> https_fn.Response:
     """
     POST JSON:
-    {
-      "query_id": "Q123",
-      "answer_text": "…",
-      "resolved_by": "sup_42"
-    }
-    Response: { "answer_id": "...", "query_id": "Q123", "status": "answered" }
+    { "query_id": "Q123", "answer_text": "…", "resolved_by": "sup_42" }
+    -> { "answer_id": "...", "query_id": "Q123", "status": "answered" }
     """
     if req.method != "POST":
         return https_fn.Response("Method not allowed", status=405)
-
+    firestore_client = firestore.client()
     body: Dict[str, Any] = req.get_json(silent=True) or {}
-    qid = body.get("query_id")
-    ans_text = body.get("answer_text")
+    qid       = body.get("query_id")
+    ans_text  = body.get("answer_text")
     resolved_by = body.get("resolved_by")
 
     if not qid or not ans_text:
         return https_fn.Response("query_id and answer_text required", status=400)
 
-    # 1) Compute embedding (outside transaction)
+    # 1) Compute embedding outside the transaction (fast fail if missing key/model)
     try:
-        vec = asyncio.get_event_loop().run_until_complete(get_embedding(ans_text))
+        vec = get_embedding_sync(ans_text)
     except Exception as e:
         return https_fn.Response(f"Embedding failed: {e}", status=500)
 
-    firestore_client = firestore.client()
     qref = firestore_client.collection("queries").document(qid)
-    aref = firestore_client.collection("answers").document()
-    iref = firestore_client.collection("answers_index").document(aref.id)
-    EMBED_DIM = 384
-    EMBED_MODEL = "text-embedding-3-small"
+    aref = firestore_client.collection("answers").document()              # new answer id
+    iref = firestore_client.collection("answers_index").document(aref.id) # mirror for vector search
 
-    # 2) Transaction: verify query, write answer, index, update query
+    # 2) Transaction
+    transaction = firestore_client.transaction()
+
     @firestore.transactional
-    def txn(tx):
-        qsnap = tx.get(qref)
+    def txn(tx: firestore.Transaction):
+        qsnap = qref.get(transaction=tx)
         if not qsnap.exists:
             raise ValueError("Query not found")
 
@@ -262,7 +255,7 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
         user_id = q.get("user_id")
         now = firestore.SERVER_TIMESTAMP
 
-        # answers
+        # /answers/{aid}
         tx.set(aref, {
             "query_id": qid,
             "user_id": user_id,
@@ -271,18 +264,18 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
             "updated_at": now,
         })
 
-        # answers_index (vector)
+        # /answers_index/{aid} (vector field must match your index field & dim)
         tx.set(iref, {
             "query_id": qid,
             "answer_text": ans_text,
-            "answer_embedding": Vector(vec),
+            "answer_embedding": Vector(vec),   # vector field
             "embedding_dim": EMBED_DIM,
             "embedding_model": EMBED_MODEL,
             "created_at": now,
             "updated_at": now,
         })
 
-        # queries update
+        # /queries/{qid} update
         updates = {
             "status": "answered",
             "answer_id": aref.id,
@@ -291,10 +284,11 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
         }
         if resolved_by:
             updates["resolved_by"] = resolved_by
+
         tx.update(qref, updates)
 
     try:
-        firestore.transaction()(txn)
+        txn(transaction)   # run the transactional function with the transaction object
     except ValueError as ve:
         return https_fn.Response(str(ve), status=404)
     except Exception as e:

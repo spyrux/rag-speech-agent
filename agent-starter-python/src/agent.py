@@ -42,9 +42,10 @@ class Assistant(Agent):
             
             If you cannot confidently answer a question, you must:
             1. Reply to the user with: "Let me check with my supervisor and get back to you."
-            2. Call the post_user_query tool with the original user question and user_id from job context metadata.""",
+            2. Call the retrieve_info tool with the original user question.
+            3. If the retrieve_info tool does not return relevant information, call the post_user_query tool with the original user question.""",
         )
-        self.collection_name = "answer-embeddings"
+        self.collection_name = "answers_index"
         openai_client.api_key = os.getenv("OPENAI_API_KEY")
         self.FIREBASE_URL= os.environ.get("FIREBASE_URL")
 
@@ -52,7 +53,8 @@ class Assistant(Agent):
         """Compute the embedding for the given text using the same model as ingestion."""
         response = openai_client.embeddings.create(
             input=text,
-            model="text-embedding-3-small"
+            model="text-embedding-3-small",
+            dimensions=1536,
         )
         return response.data[0].embedding
 
@@ -151,7 +153,8 @@ class Assistant(Agent):
 
             # Step 2: Compute embedding for the query
             query_embedding = await asyncio.to_thread(self._get_query_embedding, query)
-
+            logger.info("Embedding length: %d", len(query_embedding))
+            logger.info(f"Query embedding: {query_embedding}")
             # Step 3: Perform a semantic search using the query embedding
             semantic_results = await self._firebase_vector_search(
                 collection_name=self.collection_name,
@@ -163,11 +166,13 @@ class Assistant(Agent):
                 return "I couldn't find relevant information in our knowledge base."
 
             # Step 4: Combine retrieved results into a concise response
-            retrieved_texts = [
-                r.payload.get("text", "").strip() 
-                for r in semantic_results 
-                if r.payload.get("text")
-            ]
+            retrieved_texts = []
+            for r in semantic_results:
+                # your server returns fields at the top level (no "payload")
+                text = (r.get("text") or "").strip()
+                if text:
+                    retrieved_texts.append(text)
+            logger.info(f"Retrieved texts: {retrieved_texts}")
             if not retrieved_texts:
                 return "I couldn't find relevant information in our knowledge base."
 
