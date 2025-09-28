@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from typing import Annotated, List
-
+from google.cloud import firestore
 import aiohttp
 import openai as openai_client
 from dotenv import load_dotenv
@@ -122,8 +122,8 @@ class Assistant(Agent):
                     logger.info(f"Response status: {response.status}")
                     logger.info(f"Response body: {response_text}")
                     
-                    if response.status == 200:
-                        return f"Query posted successfully. Response: {response_text}"
+                    if response.status == 201:
+                        return f"Contacting supervisor. Response: {response_text}"
                     else:
                         return f"Failed to post query. Status: {response.status}, Response: {response_text}"
                     
@@ -154,7 +154,7 @@ class Assistant(Agent):
             return NOT_GIVEN  # don't send default message to room
 
         return message
-        
+
     @function_tool
     async def answer(self, context: RunContext, query: str) -> str:
         """
@@ -185,8 +185,6 @@ class Assistant(Agent):
 
             # Step 2: Compute embedding for the query
             query_embedding = await asyncio.to_thread(self._get_query_embedding, query)
-            logger.info("Embedding length: %d", len(query_embedding))
-            # logger.info(f"Query embedding: {query_embedding}")
             # Step 3: Perform a semantic search using the query embedding
             semantic_results = await self._firebase_vector_search(
                 collection_name=self.collection_name,
@@ -231,6 +229,8 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"Job context metadata: {ctx.job.metadata}")
     # logger.info(f"User connected to room: {user_name} (ID: {user_id})")
     logger.info(f"Room participants: {[p.identity for p in ctx.room.remote_participants.values()]}")
+
+    # Set up a watch for answers
 
     # Set up participant tracking for user identity logging BEFORE starting the session
     @ctx.room.on("participant_connected")
@@ -317,6 +317,38 @@ async def entrypoint(ctx: JobContext):
     )
 
     await ctx.connect()
+    
+    # Set up a watch for answers
+    db = firestore.Client(project="frontdeskdemo-will")
+    answers_query = (
+    db.collection("answers")
+      .where("room_name", "==", ctx.room.name)
+      .where("spoken", "==", False)
+    )
+    def _on_answers(docs, changes, read_time):
+        for ch in changes:
+            if ch.type.name not in ("ADDED", "MODIFIED"):
+                continue
+            data = ch.document.to_dict() or {}
+            text = (data.get("answer_text") or "").strip()
+            if not text:
+                continue
+
+            # 1) Immediately follow up to the caller (speak in the room)
+            # If you only want to simulate, replace with: print(f"[SIM] FOLLOW-UP: {text}")
+            asyncio.run_coroutine_threadsafe(session.say(text), asyncio.get_event_loop())
+
+            # 2) Mark as spoken to avoid repeats
+            try:
+                ch.document.reference.update({
+                    "spoken": True,
+                    "spoken_at": firestore.SERVER_TIMESTAMP,
+                })
+            except Exception:
+                logger.exception("Failed to mark answer as spoken")
+
+    answers_watch = answers_query.on_snapshot(_on_answers)
+    ctx.add_shutdown_callback(lambda: answers_watch.unsubscribe())
 
     if ctx.room.remote_participants:
         for p in ctx.room.remote_participants.values():

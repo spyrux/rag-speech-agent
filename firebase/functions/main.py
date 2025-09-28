@@ -3,6 +3,7 @@
 # Deploy with `firebase deploy`
 
 import asyncio
+import logging
 from firebase_functions import https_fn, firestore_fn
 from firebase_functions.options import set_global_options
 from firebase_admin import initialize_app, firestore
@@ -25,6 +26,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 EMBED_DIM = int(os.environ.get("EMBED_DIM", "1536"))
 initialize_app()
+logger = logging.getLogger("firebase")
 
 def json_default(o):
     if isinstance(o, datetime):
@@ -98,6 +100,7 @@ def addquery(req: https_fn.Request) -> https_fn.Response:
 
     snap = doc_ref.get()
     data = snap.to_dict() or {}
+    logger.info(f"Hey, I need help answering : {query}")
     return https_fn.Response(
         json.dumps({"id": doc_ref.id, **data}, default=json_default),
         status=201,
