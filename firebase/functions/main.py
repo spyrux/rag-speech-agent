@@ -76,9 +76,10 @@ def addquery(req: https_fn.Request) -> https_fn.Response:
     if not room_name:
         return https_fn.Response("Missing 'room_name' in request body", status=400)
     firestore_client = firestore.client()
-
-    _, doc_ref = firestore_client.collection("queries").add({
+    doc_ref = firestore_client.collection("queries").document() 
+    doc_ref.set({
         "query": query,
+        "query_id": doc_ref.id, 
         "user_id": user_id,
         "created_at": firestore.SERVER_TIMESTAMP,
         "updated_at": firestore.SERVER_TIMESTAMP,
@@ -153,8 +154,8 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
     POST body:
     {
       "query_vector": [float...],
-      "collection": "answer-embeddings",   // required
-      "top_k": 5                     // optional (default 5)
+      "collection": "embeddings",   // required
+      "top_k": 5                   
     }
     """
     if req.method != "POST":
@@ -222,9 +223,7 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
     {
       "query_id": "Q123",
       "answer_text": "…",
-      "citations": [{"doc_id":"D1","chunk_id":"C1","score":0.82}],  // optional
-      "tags": {"product":"ios","locale":"en"},                       // optional
-      "resolved_by": "sup_42"                                        // optional
+      "resolved_by": "sup_42"
     }
     Response: { "answer_id": "...", "query_id": "Q123", "status": "answered" }
     """
@@ -234,8 +233,6 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
     body: Dict[str, Any] = req.get_json(silent=True) or {}
     qid = body.get("query_id")
     ans_text = body.get("answer_text")
-    citations = body.get("citations") or []
-    tags = body.get("tags") or {}
     resolved_by = body.get("resolved_by")
 
     if not qid or not ans_text:
@@ -270,7 +267,6 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
             "query_id": qid,
             "user_id": user_id,
             "text": ans_text,
-            "citations": citations,
             "created_at": now,
             "updated_at": now,
         })
@@ -282,8 +278,6 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
             "answer_embedding": Vector(vec),
             "embedding_dim": EMBED_DIM,
             "embedding_model": EMBED_MODEL,
-            "tags": tags,
-            "sources": citations,
             "created_at": now,
             "updated_at": now,
         })
