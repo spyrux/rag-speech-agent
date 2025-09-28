@@ -216,7 +216,7 @@ async def get_embedding(text: str) -> List[float]:
     return vec
 
 @https_fn.on_request()
-def add_answer_full(req: https_fn.Request) -> https_fn.Response:
+def addanswer(req: https_fn.Request) -> https_fn.Response:
     """
     POST JSON:
     {

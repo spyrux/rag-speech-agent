@@ -141,11 +141,11 @@ class Assistant(Agent):
         return message
 
     @function_tool
-    async def retrieve_info(
-        self,
-        query: Annotated[str, llm.TypeInfo(description="The user's query to search in knowledge base")]
-    ) -> str:
-        """Retrieve relevant information from Qdrant vector database for the given query."""
+    async def retrieve_info(self, context: RunContext, query: str) -> str:
+        """Retrieve relevant information from the KB.
+        Args:
+            query: The user's query to search in knowledge base.
+        """
         try:
             logger.info(f"retrieve_info called with query: {query}")
 
@@ -153,8 +153,7 @@ class Assistant(Agent):
             query_embedding = await asyncio.to_thread(self._get_query_embedding, query)
 
             # Step 3: Perform a semantic search using the query embedding
-            semantic_results = await asyncio.to_thread(
-                self._firebase_vector_search,
+            semantic_results = await self._firebase_vector_search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
                 limit=3,  # Retrieve top 3 most relevant results
