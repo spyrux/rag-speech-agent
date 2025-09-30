@@ -6,6 +6,7 @@
 
 
 
-<img width="1486" height="921" alt="Untitled-2025-09-23-0302" src="https://github.com/user-attachments/assets/d07c6b03-4af6-4fa8-baaa-d1306b60bb03" />
+<img width="1486" height="881" alt="Untitled-2025-09-23-0302" src="https://github.com/user-attachments/assets/5b30691a-8d95-4b2e-bb36-18c21860c89c" />
+
 
 
