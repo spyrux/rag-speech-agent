@@ -17,6 +17,7 @@ export interface Query {
 
 export interface Answer {
   id: string;
+  answer_id: string;
   query_id: string;
   user_id: string;
   text: string;

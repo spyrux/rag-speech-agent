@@ -34,18 +34,28 @@ export class ApiService {
   // Get a specific query by ID
   static async getQuery(queryId: string): Promise<ApiResponse<Query>> {
     try {
-      const getQuery = httpsCallable(functions, 'getquery');
-      const result = await getQuery({ id: queryId });
-      
+      const res = await fetch(
+        `http://localhost:5001/frontdeskdemo-will/us-central1/getquery?id=${queryId}`,
+        {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+  
+      if (!res.ok) {
+        return { success: false, error: await res.text() };
+      }
+  
+      const result = await res.json();
       return {
         success: true,
-        data: result.data as Query
+        data: result.data as Query 
       };
     } catch (error) {
-      console.error('Error getting query:', error);
+      console.error("Error getting query:", error);
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.message : "Unknown error",
       };
     }
   }
@@ -116,6 +126,25 @@ export class ApiService {
       return {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
+      };
+    }
+  }
+
+  // Get all answers
+  static async getAllAnswers(): Promise<ApiResponse<Answer[]>> {
+    try {
+      const getAllAnswers = httpsCallable(functions, 'getallanswers');
+      const result = await getAllAnswers();
+      console.log(result.data);
+      return {
+        success: true,
+        data: (result.data as { answers: Answer[] }).answers
+      };
+    } catch (error) {
+      console.error('Error getting all answers:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
       };
     }
   }

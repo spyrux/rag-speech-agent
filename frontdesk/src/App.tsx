@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import './App.css'
 import ApiService from './api'
-import type { Query, CreateAnswerRequest } from './types'
+import type { Query, CreateAnswerRequest, Answer } from './types'
 
-type TabType = 'pending' | 'resolved' | 'unresolved'
+type TabType = 'pending' | 'resolved' | 'unresolved' | 'allanswers'
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabType>('pending')
@@ -15,10 +15,16 @@ function App() {
   const [submittingAnswer, setSubmittingAnswer] = useState(false)
   const [selectedAnswer, setSelectedAnswer] = useState<string>('')
   const [loadingAnswer, setLoadingAnswer] = useState(false)
+  const [allAnswers, setAllAnswers] = useState<Answer[]>([])
+  const [loadingAllAnswers, setLoadingAllAnswers] = useState(false)
+  const [selectedAnswerDetail, setSelectedAnswerDetail] = useState<Answer | null>(null)
+  const [selectedQueryForAnswer, setSelectedQueryForAnswer] = useState<Query | null>(null)
+  const [loadingQueryForAnswer, setLoadingQueryForAnswer] = useState(false)
 
   // Load all queries on component mount
   useEffect(() => {
     loadQueries()
+    loadAllAnswers()
   }, [])
 
   const loadQueries = async () => {
@@ -37,6 +43,7 @@ function App() {
       setLoading(false)
     }
   }
+  
   const getAnswer = async (query?: Query) => {
     const targetQuery = query || selectedQuery
     if (!targetQuery || !targetQuery.answer_id) return
@@ -56,6 +63,41 @@ function App() {
       setError('Failed to load answer')
     } finally {
       setLoadingAnswer(false)
+    }
+  }
+
+  const loadAllAnswers = async () => {
+    setLoadingAllAnswers(true)
+    setError(null)
+    try {
+      const response = await ApiService.getAllAnswers()
+      if (response.success && response.data) {
+        setAllAnswers(response.data)
+      } else {
+        setError(response.error || 'Failed to load all answers')
+      }
+    } catch (err) {
+      setError('Failed to load all answers')
+    } finally {
+      setLoadingAllAnswers(false)
+    }
+  }
+
+  const getQueryForAnswer = async (queryId: string) => {
+    setLoadingQueryForAnswer(true)
+    setError(null)
+    try {
+      const response = await ApiService.getQuery(queryId)
+      console.log(response)
+      if (response.success && response.data) {
+        setSelectedQueryForAnswer(response.data)
+      } else {
+        setError(response.error || 'Failed to load query information')
+      }
+    } catch (err) {
+      setError('Failed to load query information')
+    } finally {
+      setLoadingQueryForAnswer(false)
     }
   }
   const submitAnswer = async () => {
@@ -155,7 +197,8 @@ function App() {
         {[
           { key: 'pending', label: 'Pending Requests', count: queries.filter(q => q.status === 'pending').length },
           { key: 'resolved', label: 'Resolved', count: queries.filter(q => q.status === 'resolved').length },
-          { key: 'unresolved', label: 'Unresolved', count: queries.filter(q => q.status === 'unresolved').length }
+          { key: 'unresolved', label: 'Unresolved', count: queries.filter(q => q.status === 'unresolved').length },
+          { key: 'allanswers', label: 'Learned Answers', count: allAnswers.length }
         ].map(tab => (
           <button
             key={tab.key}
@@ -164,6 +207,8 @@ function App() {
               setSelectedQuery(null)
               setSelectedAnswer('')
               setAnswerText('')
+              setSelectedAnswerDetail(null)
+              setSelectedQueryForAnswer(null)
             }}
             style={{
               padding: '12px 24px',
@@ -200,9 +245,76 @@ function App() {
       <div style={{ display: 'flex', gap: '20px' }}>
         {/* Requests List */}
         <div style={{ flex: 1 }}>
-
-          
-          {filteredQueries.length === 0 ? (
+          {activeTab === 'allanswers' ? (
+            // All Answers Content
+            <>
+              {loadingAllAnswers ? (
+                <div style={{ 
+                  textAlign: 'center', 
+                  padding: '40px',
+                  color: '#666',
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: '6px'
+                }}>
+                  <p>Loading all answers...</p>
+                </div>
+              ) : allAnswers.length === 0 ? (
+                <div style={{ 
+                  textAlign: 'center', 
+                  padding: '40px',
+                  color: '#666',
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: '6px'
+                }}>
+                  <p>No answers found.</p>
+                </div>
+              ) : (
+                <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
+                  {allAnswers.map((answer) => (
+                    <div 
+                      key={answer.id} 
+                      style={{ 
+                        border: '1px solid #ddd', 
+                        padding: '16px', 
+                        margin: '8px 0',
+                        borderRadius: '6px',
+                        backgroundColor: '#f8f9fa',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onClick={() => {
+                        setSelectedAnswerDetail(answer)
+                        getQueryForAnswer(answer.query_id)
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontWeight: 'bold', marginBottom: '4px', fontSize: '14px' }}>
+                            Answer ID: {answer.id}
+                          </div>
+                          <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
+                            <strong>Query ID:</strong> {answer.query_id} | 
+                            <strong> User:</strong> {answer.user_id}
+                          </div>
+                          <div style={{ fontSize: '14px', color: '#333', lineHeight: '1.4' }}>
+                            {answer.text.length > 150 ? `${answer.text.substring(0, 150)}...` : answer.text}
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div style={{ fontSize: '12px', color: '#666' }}>
+                        <strong>Created:</strong> {new Date(answer.created_at).toLocaleString()} | 
+                        <strong> Updated:</strong> {new Date(answer.updated_at).toLocaleString()}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            // Original Queries Content
+            <>
+              {filteredQueries.length === 0 ? (
             <div style={{ 
               textAlign: 'center', 
               padding: '40px',
@@ -267,6 +379,8 @@ function App() {
                 </div>
               ))}
             </div>
+          )}
+            </>
           )}
         </div>
 
@@ -423,6 +537,139 @@ function App() {
               onClick={() => {
                 setSelectedQuery(null)
                 setSelectedAnswer('')
+              }}
+              style={{
+                padding: '10px 16px',
+                backgroundColor: '#6c757d',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                width: '100%'
+              }}
+            >
+              Close
+            </button>
+          </div>
+        )}
+
+        {/* Answer Detail Panel (only for all answers tab) */}
+        {activeTab === 'allanswers' && selectedAnswerDetail && (
+          <div style={{ 
+            width: '400px', 
+            padding: '20px',
+            backgroundColor: '#f8f9fa',
+            borderRadius: '6px',
+            border: '1px solid #ddd'
+          }}>
+            <h3 style={{ marginBottom: '16px', color: '#333' }}>Answer Details</h3>
+            
+
+            <div style={{ marginBottom: '16px' }}>
+              <strong>Original Query:</strong>
+              {loadingQueryForAnswer ? (
+                <div style={{ 
+                  padding: '8px', 
+                  backgroundColor: '#f8f9fa', 
+                  borderRadius: '4px',
+                  marginTop: '4px',
+                  fontSize: '14px',
+                  textAlign: 'center',
+                  color: '#666'
+                }}>
+                  Loading query information...
+                </div>
+              ) : selectedQueryForAnswer ? (
+                <div style={{ 
+                  padding: '8px', 
+                  backgroundColor: 'white', 
+                  borderRadius: '4px',
+                  marginTop: '4px',
+                  fontSize: '14px',
+                  whiteSpace: 'pre-wrap'
+                }}>
+                  {selectedQueryForAnswer.query}
+                </div>
+              ) : (
+                <div style={{ 
+                  padding: '8px', 
+                  backgroundColor: '#fff3cd', 
+                  borderRadius: '4px',
+                  marginTop: '4px',
+                  fontSize: '14px',
+                  color: '#856404'
+                }}>
+                  Query information not available
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <strong>Answer Text:</strong>
+              <div style={{ 
+                padding: '8px', 
+                backgroundColor: 'white', 
+                borderRadius: '4px',
+                marginTop: '4px',
+                fontSize: '14px',
+                whiteSpace: 'pre-wrap',
+                maxHeight: '200px',
+                overflowY: 'auto'
+              }}>
+                {selectedAnswerDetail.text}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <strong>Answer ID:</strong>
+              <div style={{ 
+                padding: '8px', 
+                backgroundColor: 'white', 
+                borderRadius: '4px',
+                marginTop: '4px',
+                fontSize: '14px',
+                fontFamily: 'monospace'
+              }}>
+                {selectedAnswerDetail.id}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <strong>Query ID:</strong>
+              <div style={{ 
+                padding: '8px', 
+                backgroundColor: 'white', 
+                borderRadius: '4px',
+                marginTop: '4px',
+                fontSize: '14px',
+                fontFamily: 'monospace'
+              }}>
+                {selectedAnswerDetail.query_id}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <strong>User ID:</strong>
+              <div style={{ 
+                padding: '8px', 
+                backgroundColor: 'white', 
+                borderRadius: '4px',
+                marginTop: '4px',
+                fontSize: '14px'
+              }}>
+                {selectedAnswerDetail.user_id}
+              </div>
+            </div>
+
+            <div style={{ fontSize: '12px', color: '#666', marginBottom: '16px' }}>
+              <strong>Answer Created:</strong> {new Date(selectedAnswerDetail.created_at).toLocaleString()} | 
+              <strong> Updated:</strong> {new Date(selectedAnswerDetail.updated_at).toLocaleString()}
+            </div>
+            
+            <button
+              onClick={() => {
+                setSelectedAnswerDetail(null)
+                setSelectedQueryForAnswer(null)
               }}
               style={{
                 padding: '10px 16px',
