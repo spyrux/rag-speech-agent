@@ -3,7 +3,6 @@
 # Deploy with `firebase deploy`
 
 import asyncio
-import logging
 from firebase_functions import https_fn, firestore_fn
 from firebase_functions.options import set_global_options
 from firebase_admin import initialize_app, firestore
@@ -15,6 +14,8 @@ from google.cloud.firestore_v1.vector import Vector
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List
+from flask import Flask
+from flask_cors import CORS
 
 # For cost control, you can set the maximum number of containers that can be
 # running at the same time. This helps mitigate the impact of unexpected
@@ -26,12 +27,16 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-3-small")
 EMBED_DIM = int(os.environ.get("EMBED_DIM", "1536"))
 initialize_app()
-logger = logging.getLogger("firebase")
+
+# Initialize Flask app for CORS
+app = Flask(__name__)
+CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
 
 def json_default(o):
     if isinstance(o, datetime):
         return o.isoformat()
     return str(o)
+
 def normalize_ts(v):
     return v.isoformat() if isinstance(v, datetime) else v
 
@@ -39,6 +44,13 @@ def strip_vectors(d: Dict[str, Any]):
     d.pop("embedding", None)
     d.pop("answer_embedding", None)
     return d
+
+def add_cors_headers(response):
+    """Add CORS headers to response"""
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
 
 # TTL deletion fires this and updates the query document to unresolved
 @firestore_fn.on_document_deleted(document="timers/{id}")
@@ -55,12 +67,18 @@ def on_timer_deleted(event: firestore_fn.Event[firestore.DocumentSnapshot]) -> N
 @https_fn.on_request()
 def addquery(req: https_fn.Request) -> https_fn.Response:
     """Create a new query document from a POST request with JSON body."""
+    # Handle CORS preflight request
+    if req.method == "OPTIONS":
+        response = https_fn.Response("", status=200)
+        return add_cors_headers(response)
+    
     if req.method != "POST":
-        return https_fn.Response(
+        response = https_fn.Response(
             "Method not allowed. Use POST.",
             status=405,
             content_type="text/plain"
         )
+        return add_cors_headers(response)
 
     # Parse JSON body
     data = req.get_json(silent=True) or {}
@@ -69,16 +87,20 @@ def addquery(req: https_fn.Request) -> https_fn.Response:
     deadline = now + timedelta(hours=24)
 
     if not query:
-        return https_fn.Response("Missing 'query' in request body", status=400)
+        response = https_fn.Response("Missing 'query' in request body", status=400)
+        return add_cors_headers(response)
     user_id = data.get("user_id")
     if not user_id:
-        return https_fn.Response("Missing 'user_id' in request body", status=400)
+        response = https_fn.Response("Missing 'user_id' in request body", status=400)
+        return add_cors_headers(response)
     job_id = data.get("job_id")
     if not job_id:
-        return https_fn.Response("Missing 'job_id' in request body", status=400)
+        response = https_fn.Response("Missing 'job_id' in request body", status=400)
+        return add_cors_headers(response)
     room_name = data.get("room_name")
     if not room_name:
-        return https_fn.Response("Missing 'room_name' in request body", status=400)
+        response = https_fn.Response("Missing 'room_name' in request body", status=400)
+        return add_cors_headers(response)
     firestore_client = firestore.client()
     doc_ref = firestore_client.collection("queries").document() 
     doc_ref.set({
@@ -100,43 +122,118 @@ def addquery(req: https_fn.Request) -> https_fn.Response:
 
     snap = doc_ref.get()
     data = snap.to_dict() or {}
-    logger.info(f"Hey, I need help answering : {query}")
-    return https_fn.Response(
+    print(f"Hey, I need help answering : {query}")
+    response = https_fn.Response(
         json.dumps({"id": doc_ref.id, **data}, default=json_default),
         status=201,
         content_type="application/json",
     )
+    return add_cors_headers(response)
 
 @https_fn.on_request()
 def getquery(req: https_fn.Request) -> https_fn.Response:
     """Fetch a query document by ID and return its data as JSON."""
-    message_id = req.args.get("id")
+    # Handle CORS preflight request
+    if req.method == "OPTIONS":
+        response = https_fn.Response("", status=200)
+        return add_cors_headers(response)
+    
+    # Accept both GET and POST methods (Firebase Functions SDK sends POST by default)
+    if req.method not in ["GET", "POST"]:
+        response = https_fn.Response(
+            "Method not allowed. Use GET or POST.",
+            status=405,
+            content_type="text/plain"
+        )
+        return add_cors_headers(response)
+    
+    # For POST requests, get the ID from the request body
+    if req.method == "POST":
+        data = req.get_json(silent=True) or {}
+        message_id = data.get("id")
+    else:
+        message_id = req.args.get("id")
+    
     if not message_id:
-        return https_fn.Response("Missing id parameter", status=400)
+        response = https_fn.Response("Missing id parameter", status=400)
+        return add_cors_headers(response)
 
     firestore_client = firestore.client()
     doc_ref = firestore_client.collection("queries").document(message_id)
     doc = doc_ref.get()
 
     if not doc.exists:
-        return https_fn.Response(f"Query with ID {message_id} not found", status=404)
+        response = https_fn.Response(f"Query with ID {message_id} not found", status=404)
+        return add_cors_headers(response)
 
     data = doc.to_dict()
-    return https_fn.Response(
+    response = https_fn.Response(
+        json.dumps({"data": {"id": doc.id, **data}}, default=json_default),
+        status=200,
+        content_type="application/json"
+    )
+    return add_cors_headers(response)
+
+@https_fn.on_request()
+def getanswer(req: https_fn.Request) -> https_fn.Response:
+    """Fetch a answer document by ID and return its data as JSON."""
+    # Handle CORS preflight request
+    if req.method == "OPTIONS":
+        response = https_fn.Response("", status=200)
+        return add_cors_headers(response)
+    
+    # Accept both GET and POST methods (Firebase Functions SDK sends POST by default)
+    if req.method not in ["GET", "POST"]:
+        response = https_fn.Response(
+            "Method not allowed. Use GET or POST.",
+            status=405,
+            content_type="text/plain"
+        )
+        return add_cors_headers(response)
+    
+    # For POST requests, get the ID from the request body
+    if req.method == "POST":
+        data = req.get_json(silent=True) or {}
+        answer_id = data.get("id")
+    else:
+        answer_id = req.args.get("id")
+    
+    if not answer_id:
+        response = https_fn.Response("Missing id parameter", status=400)
+        return add_cors_headers(response)
+
+    firestore_client = firestore.client()
+    doc_ref = firestore_client.collection("answers").document(answer_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        response = https_fn.Response(f"Answer with ID {answer_id} not found", status=404)
+        return add_cors_headers(response)
+
+    data = doc.to_dict()
+    response = https_fn.Response(
         json.dumps({"id": doc.id, **data}, default=json_default),
         status=200,
         content_type="application/json"
     )
+    return add_cors_headers(response)
 
 @https_fn.on_request()
 def getallqueries(req: https_fn.Request) -> https_fn.Response:
     """Fetch all query documents and return them as JSON."""
-    if req.method != "GET":
-        return https_fn.Response(
-            "Method not allowed. Use GET.",
+    # Handle CORS preflight request
+    if req.method == "OPTIONS":
+        response = https_fn.Response("", status=200)
+        return add_cors_headers(response)
+    
+    # Accept both GET and POST methods (Firebase Functions SDK sends POST by default)
+    if req.method not in ["GET", "POST"]:
+        response = https_fn.Response(
+            "Method not allowed. Use GET or POST.",
             status=405,
             content_type="text/plain"
         )
+        return add_cors_headers(response)
 
     firestore_client = firestore.client()
     queries_ref = firestore_client.collection("queries")
@@ -147,11 +244,45 @@ def getallqueries(req: https_fn.Request) -> https_fn.Response:
         data = doc.to_dict()
         queries.append({"id": doc.id, **data})
 
-    return https_fn.Response(
-        json.dumps({"queries": queries}, default=json_default),
+    response = https_fn.Response(
+        json.dumps({"data": {"queries": queries}}, default=json_default),
         status=200,
         content_type="application/json"
     )
+    return add_cors_headers(response)
+
+@https_fn.on_request()
+def getallanswers(req: https_fn.Request) -> https_fn.Response:
+    """Fetch all answer documents and return them as JSON."""
+    # Handle CORS preflight request
+    if req.method == "OPTIONS":
+        response = https_fn.Response("", status=200)
+        return add_cors_headers(response)
+    
+    # Accept both GET and POST methods (Firebase Functions SDK sends POST by default)
+    if req.method not in ["GET", "POST"]:
+        response = https_fn.Response(
+            "Method not allowed. Use GET or POST.",
+            status=405,
+            content_type="text/plain"
+        )
+        return add_cors_headers(response)
+
+    firestore_client = firestore.client()
+    answers_ref = firestore_client.collection("answers")
+    docs = answers_ref.stream()
+
+    answers = []
+    for doc in docs:
+        data = doc.to_dict()
+        answers.append({"id": doc.id, **data})
+
+    response = https_fn.Response(
+        json.dumps({"data": {"answers": answers}}, default=json_default),
+        status=200,
+        content_type="application/json"
+    )
+    return add_cors_headers(response)
 
 @https_fn.on_request()
 def vector_search(req: https_fn.Request) -> https_fn.Response:
@@ -163,8 +294,14 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
       "top_k": 5                   
     }
     """
+    # Handle CORS preflight request
+    if req.method == "OPTIONS":
+        response = https_fn.Response("", status=200)
+        return add_cors_headers(response)
+    
     if req.method != "POST":
-        return https_fn.Response("Method not allowed", status=405)
+        response = https_fn.Response("Method not allowed", status=405)
+        return add_cors_headers(response)
 
     body = req.get_json(silent=True) or {}
     query_vector = body.get("query_vector")
@@ -173,9 +310,11 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
     top_k = int(body.get("top_k", 5))
 
     if not query_vector or not isinstance(query_vector, list):
-        return https_fn.Response("query_vector must be a list", status=400)
+        response = https_fn.Response("query_vector must be a list", status=400)
+        return add_cors_headers(response)
     if not collection_name:
-        return https_fn.Response("collection is required", status=400)
+        response = https_fn.Response("collection is required", status=400)
+        return add_cors_headers(response)
 
     try:
         firestore_client = firestore.client()
@@ -199,14 +338,16 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
                     doc[k] = normalize_ts(doc[k])
             results.append(doc)
 
-        return https_fn.Response(
+        response = https_fn.Response(
             json.dumps({"matches": results}, default=json_default),
             status=200,
             content_type="application/json",
         )
+        return add_cors_headers(response)
 
     except Exception as e:
-        return https_fn.Response(f"Error performing vector search: {e}", status=500)
+        response = https_fn.Response(f"Error performing vector search: {e}", status=500)
+        return add_cors_headers(response)
 
 def get_embedding_sync(text: str) -> list[float]:
     """Synchronous embedding call (OpenAI). Replace with your own if needed."""
@@ -224,8 +365,14 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
     { "query_id": "Q123", "answer_text": "…", "resolved_by": "sup_42" }
     -> { "answer_id": "...", "query_id": "Q123", "status": "answered" }
     """
+    # Handle CORS preflight request
+    if req.method == "OPTIONS":
+        response = https_fn.Response("", status=200)
+        return add_cors_headers(response)
+    
     if req.method != "POST":
-        return https_fn.Response("Method not allowed", status=405)
+        response = https_fn.Response("Method not allowed", status=405)
+        return add_cors_headers(response)
     firestore_client = firestore.client()
     body: Dict[str, Any] = req.get_json(silent=True) or {}
     qid       = body.get("query_id")
@@ -233,13 +380,15 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
     resolved_by = body.get("resolved_by")
 
     if not qid or not ans_text:
-        return https_fn.Response("query_id and answer_text required", status=400)
+        response = https_fn.Response("query_id and answer_text required", status=400)
+        return add_cors_headers(response)
 
     # 1) Compute embedding outside the transaction (fast fail if missing key/model)
     try:
         vec = get_embedding_sync(ans_text)
     except Exception as e:
-        return https_fn.Response(f"Embedding failed: {e}", status=500)
+        response = https_fn.Response(f"Embedding failed: {e}", status=500)
+        return add_cors_headers(response)
 
     qref = firestore_client.collection("queries").document(qid)
     aref = firestore_client.collection("answers").document()              # new answer id
@@ -280,7 +429,7 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
 
         # /queries/{qid} update
         updates = {
-            "status": "answered",
+            "status": "resolved",
             "answer_id": aref.id,
             "updated_at": now,
             "last_response_at": now,
@@ -293,12 +442,15 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
     try:
         txn(transaction)   # run the transactional function with the transaction object
     except ValueError as ve:
-        return https_fn.Response(str(ve), status=404)
+        response = https_fn.Response(str(ve), status=404)
+        return add_cors_headers(response)
     except Exception as e:
-        return https_fn.Response(f"Write failed: {e}", status=500)
-
-    return https_fn.Response(
+        response = https_fn.Response(f"Write failed: {e}", status=500)
+        return add_cors_headers(response)
+    print(f"Supervisor answered the query:{qid} with answer:{ans_text}")
+    response = https_fn.Response(
         json.dumps({"answer_id": aref.id, "query_id": qid, "status": "answered"}),
         status=201,
         content_type="application/json",
     )
+    return add_cors_headers(response)
