@@ -323,6 +323,8 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
             vector_field="answer_embedding",
             query_vector=Vector([float(x) for x in query_vector]),
             distance_measure=DistanceMeasure.COSINE,
+            distance_result_field="_vector_distance",
+            distance_threshold=0.7,
             limit=top_k,
         )
 

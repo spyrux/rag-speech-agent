@@ -225,7 +225,9 @@ function App() {
         ))}
         
         <button 
-          onClick={loadQueries}
+          onClick={()=>{
+            loadQueries()
+            loadAllAnswers()}}
           disabled={loading}
           style={{
             marginLeft: 'auto',

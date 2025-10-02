@@ -91,7 +91,7 @@ class Assistant(Agent):
                 data = json.loads(text)
                 return data.get("matches", [])
             
-    @function_tool
+
     async def post_user_query(self, context: RunContext, query: str):
         """Post a user message to the HITL endpoint.
 
@@ -136,61 +136,64 @@ class Assistant(Agent):
             logger.error(error_msg)
             return error_msg
 
-    async def on_llm_response(self, context: RunContext, message: str):
-        """Intercept LLM output and escalate if needed"""
-        if not message or "I don't know" in message.lower():
-            # Send friendly fallback to user
-            await context.session.say("Let me check with my supervisor and get back to you.")
-            
-            # Escalate
-            job_ctx = context.job
-            room = job_ctx.room
-            participant = next(iter(room.remote_participants.values()))
-            await self.post_user_query(
-                context,
-                query=message,
-                user_id=participant.attributes.get("user_id"),
-            )
-            return NOT_GIVEN  # don't send default message to room
-
-        return message
-
     @function_tool
     async def answer(self, context: RunContext, query: str) -> str:
-        # 1) Retrieve info
-        semantic_results = await self._firebase_vector_search(
-            collection_name=self.collection_name,
-            query_vector=await asyncio.to_thread(self._get_query_embedding, query),
-            limit=3,
-        )
-
-        if not semantic_results:
-            await self.post_user_query(context, query=query)
-            return "Let me check with my supervisor and get back to you."
-
-        best = semantic_results[0]
-        answer_text = (best.get("answer_text") or "").strip()
-        score = best.get("score", 1.0)  # smaller is better if distance, larger is better if similarity
-
-        # 2) Confidence based on similarity
-        if score > 0.25:  # tune this threshold
-            await self.post_user_query(context, query=query)
-            return "Let me check with my supervisor and get back to you."
-
-        # 3) Validation with LLM
-        validation_prompt = f"""
-        User question: {query}
-        Retrieved text: {answer_text}
-
-        Does this retrieved text answer the user’s question? Answer "Yes" or "No".
         """
-        resp = await context.session.llm.complete(validation_prompt)
-        if "no" in resp.lower():
-            await self.post_user_query(context, query=query)
-            return "Let me check with my supervisor and get back to you."
+        Resolve user questions by checking the KB first, then escalating if needed.
+        Returns the exact text the agent should say to the user.
+        """
+        # 1) Try KB
+        kb_resp = await self.retrieve_info(context, query=query)
+        if kb_resp and "I couldn't find relevant information" not in kb_resp:
+            # Strip the "Here's what I found:\n" prefix if present
+            if kb_resp.lower().startswith("here's what i found"):
+                kb_resp = kb_resp.split("\n", 1)[-1].strip() or kb_resp
+            return kb_resp
 
-        # 4) If confident → return answer
-        return answer_text
+        # 2) Escalate (HITL)
+        # Post to supervisor, then return the mandated line
+        await self.post_user_query(context, query=query)
+        return "Let me check with my supervisor and get back to you."
+
+    async def retrieve_info(self, context: RunContext, query: str) -> str:
+        """Retrieve relevant information from the KB.
+        Args:
+            query: The user's query to search in knowledge base.
+        """
+        try:
+            logger.info(f"retrieve_info called with query: {query}")
+
+            # Step 2: Compute embedding for the query
+            query_embedding = await asyncio.to_thread(self._get_query_embedding, query)
+            # Step 3: Perform a semantic search using the query embedding
+            semantic_results = await self._firebase_vector_search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=3,  # Retrieve top 3 most relevant results
+            )
+            logger.info(f"Semantic search returned {len(semantic_results)} points")
+            if not semantic_results or len(semantic_results) == 0:
+                return "I couldn't find relevant information in our knowledge base."
+
+            # Step 4: Combine retrieved results into a concise response
+            retrieved_texts = []
+            for r in semantic_results:
+                # your server returns fields at the top level (no "payload")
+                text = (r.get("answer_text") or "").strip()
+                if text:
+                    retrieved_texts.append(text)
+            logger.info(f"Retrieved texts: {retrieved_texts}")
+            if not retrieved_texts:
+                return "I couldn't find relevant information in our knowledge base."
+
+            combined_response = "\n".join(retrieved_texts)
+            truncated_response = combined_response[:1000]  # Limit response length
+            logger.info(f"Returning combined response: {truncated_response}")
+            return f"Here's what I found:\n{truncated_response}"
+
+        except Exception as e:
+            logger.error(f"Error in retrieve_info: {e}")
+            return f"Error retrieving information: {str(e)}"
 
 
 def prewarm(proc: JobProcess):
@@ -242,7 +245,7 @@ async def entrypoint(ctx: JobContext):
         vad=ctx.proc.userdata["vad"],
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
-        preemptive_generation=True,
+        preemptive_generation=False,
     )
 
     # To use a realtime model instead of a voice pipeline, use the following session setup instead:
