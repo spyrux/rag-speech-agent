@@ -133,7 +133,10 @@ timers/{id}: { query_ref, delete_at } → on delete sets linked query status="un
 
 
 <h1>Key Design Decisions</h1>
-- /answer_index stores "query_embeddings" and "answer_text" to allow for vector search using "query_vector"  
+
+- /answer_index stores "query_embeddings" and "answer_text" to allow for vector search using "query_vector"
+
+  
 
 - Created /timers collection to utilize Firebase's ttl for automatic document deletion, which calls a callback to update query status to "unresolved" for timeouts.
 
