@@ -132,7 +132,9 @@ timers/{id}: { query_ref, delete_at } → on delete sets linked query status="un
 | POST                       | /addanswer     | Create answer, index embedding, resolve | {query_id, answer_text, resolved_by?}              |
 
 
-<h1>Key Design Decisions</h1>
+<h1>Key Considerations</h1>
+
+<h2>Design Decisions</h2>
 
 - /answer_index stores "query_embeddings" and "answer_text" to allow for vector search using "query_vector"
 
@@ -148,3 +150,12 @@ timers/{id}: { query_ref, delete_at } → on delete sets linked query status="un
 
   
 - Vector search retrieves top k results to augment with multiple documents if relevant.
+
+<h2>Improvements</h2>
+
+- Implement WebHooks for supervisor and user callbacks for query requests and responses.
+
+- Clustering and storing centroid indices for similar queries.
+  -   Allows for assigning priority depending on how big clusters are.  
+  -   Cache answer_text by cluster index for fast retrieval of frequently accessed questions before accessing KB.  
+  -   Allows for grouping of similar queries, so Admin only needs to answer once.  
