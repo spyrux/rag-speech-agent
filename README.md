@@ -134,7 +134,14 @@ timers/{id}: { query_ref, delete_at } → on delete sets linked query status="un
 
 <h1>Key Design Decisions</h1>
 - /answer_index stores "query_embeddings" and "answer_text" to allow for vector search using "query_vector"  
-- Created /timers collection to utilize Firebase's ttl for automatic document deletion, which calls a callback to update query status to "unresolved" for timeouts.  
-- Vector search utilizes Cosine Similarity, which measures orientation and not magnitude and is optimal for text embedding retrieval.  
-- Queries are stored with user_id, room_name, job_id, to simulate necessary metadata for a callback to a user.  
+
+- Created /timers collection to utilize Firebase's ttl for automatic document deletion, which calls a callback to update query status to "unresolved" for timeouts.
+
+  
+- Vector search utilizes Cosine Similarity, which measures orientation and not magnitude and is optimal for text embedding retrieval.
+
+  
+- Queries are stored with user_id, room_name, job_id, to simulate necessary metadata for a callback to a user.
+
+  
 - Vector search retrieves top k results to augment with multiple documents if relevant.
