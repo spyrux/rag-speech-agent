@@ -320,11 +320,11 @@ def vector_search(req: https_fn.Request) -> https_fn.Response:
         firestore_client = firestore.client()
         collection = firestore_client.collection(collection_name)
         vector_query = collection.find_nearest(
-            vector_field="answer_embedding",
+            vector_field="query_embedding",
             query_vector=Vector([float(x) for x in query_vector]),
             distance_measure=DistanceMeasure.COSINE,
             distance_result_field="_vector_distance",
-            distance_threshold=0.7,
+            distance_threshold=0.6,
             limit=top_k,
         )
 
@@ -380,14 +380,20 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
     qid       = body.get("query_id")
     ans_text  = body.get("answer_text")
     resolved_by = body.get("resolved_by")
-
+    
     if not qid or not ans_text:
         response = https_fn.Response("query_id and answer_text required", status=400)
         return add_cors_headers(response)
+    qref = firestore_client.collection("queries").document(qid)
+    qsnap = qref.get()
+    if not qsnap.exists:
+        response = https_fn.Response("Query not found", status=404)
+        return add_cors_headers(response)
+    q = qsnap.to_dict() or {}
 
     # 1) Compute embedding outside the transaction (fast fail if missing key/model)
     try:
-        vec = get_embedding_sync(ans_text)
+        vec = get_embedding_sync(q.get("query"))
     except Exception as e:
         response = https_fn.Response(f"Embedding failed: {e}", status=500)
         return add_cors_headers(response)
@@ -422,7 +428,7 @@ def addanswer(req: https_fn.Request) -> https_fn.Response:
         tx.set(iref, {
             "query_id": qid,
             "answer_text": ans_text,
-            "answer_embedding": Vector(vec),   # vector field
+            "query_embedding": Vector(vec),   # vector field
             "embedding_dim": EMBED_DIM,
             "embedding_model": EMBED_MODEL,
             "created_at": now,
