@@ -109,7 +109,7 @@ pnpm dev
 
 <h1>API's and Collections</h1>
 
-Collections
+<h2>Collections</h2>
 
 queries/{id}: { query, user_id, room_name, job_id, status: "pending|resolved|unresolved", deadline, answer_id?, last_response_at?, resolved_by?, created_at, updated_at }
 
